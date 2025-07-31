@@ -1,3 +1,4 @@
+```yaml
 name: Deploy Java Application to AWS
 
 on:
@@ -124,6 +125,16 @@ jobs:
           cd ../..
         fi
         
+    - name: Create Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        FROM amazoncorretto:11
+        WORKDIR /app
+        COPY build/libs/project.jar app.jar
+        EXPOSE 9000
+        CMD ["java", "-jar", "app.jar"]
+        EOF
+        
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -145,13 +156,7 @@ jobs:
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       run: |
-        # Check if Dockerfile exists in docker/ folder, otherwise use root
-        DOCKERFILE_PATH="docker/Dockerfile"
-        if [ ! -f "$DOCKERFILE_PATH" ]; then
-          DOCKERFILE_PATH="Dockerfile"
-          echo "Dockerfile not found in docker/, using root Dockerfile"
-        fi
-        docker build -f $DOCKERFILE_PATH -t $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG .
         docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
         
         # Push image to ECR
@@ -176,6 +181,83 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
         
+    - name: Verify security group rule
+      run: |
+        # Verify security group rule sgr-06156665bc4acd952 allows TCP 9000
+        SG_RULE=$(aws ec2 describe-security-groups \
+          --group-ids ${{ secrets.SECURITY_GROUP_ID }} \
+          --query 'SecurityGroups[0].IpPermissions[?IpProtocol==`tcp` && ToPort==`9000`]' \
+          --region $AWS_REGION \
+          --output text)
+        if [ -z "$SG_RULE" ]; then
+          echo "Security group rule for TCP 9000 not found, attempting to add..."
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.SECURITY_GROUP_ID }} \
+            --protocol tcp \
+            --port 9000 \
+            --cidr 0.0.0.0/0 \
+            --region $AWS_REGION || (echo "Failed to add security group rule, check IAM permissions" && exit 1)
+        else
+          echo "Security group rule for TCP 9000 verified (sgr-06156665bc4acd952)"
+        fi
+        
+    - name: Create or update Load Balancer
+      run: |
+        # Check if ALB exists
+        ALB_ARN=$(aws elbv2 describe-load-balancers \
+          --names java-app-alb \
+          --query 'LoadBalancers[0].LoadBalancerArn' \
+          --output text \
+          --region $AWS_REGION 2>/dev/null || echo "None")
+        
+        if [ "$ALB_ARN" = "None" ]; then
+          echo "Creating new Application Load Balancer..."
+          ALB_ARN=$(aws elbv2 create-load-balancer \
+            --name java-app-alb \
+            --subnets ${{ secrets.SUBNET_ID_1 }} ${{ secrets.SUBNET_ID_2 }} \
+            --security-groups ${{ secrets.SECURITY_GROUP_ID }} \
+            --scheme internet-facing \
+            --type application \
+            --ip-address-type ipv4 \
+            --region $AWS_REGION \
+            --query 'LoadBalancers[0].LoadBalancerArn' \
+            --output text)
+          echo "Created ALB: $ALB_ARN"
+          
+          # Create Target Group
+          TG_ARN=$(aws elbv2 create-target-group \
+            --name java-app-targets \
+            --protocol HTTP \
+            --port 9000 \
+            --vpc-id ${{ secrets.VPC_ID }} \
+            --target-type instance \
+            --health-check-protocol HTTP \
+            --health-check-path /health \
+            --health-check-interval-seconds 30 \
+            --health-check-timeout-seconds 5 \
+            --healthy-threshold-count 5 \
+            --unhealthy-threshold-count 2 \
+            --region $AWS_REGION \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+          echo "Created Target Group: $TG_ARN"
+          
+          # Create Listener
+          aws elbv2 create-listener \
+            --load-balancer-arn $ALB_ARN \
+            --protocol HTTP \
+            --port 80 \
+            --default-actions Type=forward,TargetGroupArn=$TG_ARN \
+            --region $AWS_REGION
+        else
+          echo "Load balancer already exists: $ALB_ARN"
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names java-app-targets \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text \
+            --region $AWS_REGION)
+        fi
+        
     - name: Deploy to EC2
       env:
         DOCKER_IMAGE_URI: ${{ needs.build.outputs.image-uri }}
@@ -190,15 +272,35 @@ jobs:
         if [ -z "$INSTANCE_IDS" ]; then
           echo "No running EC2 instances found. Creating new instance..."
           
-          # Create new EC2 instance with SSM IAM role
+          # Create user data script to install Docker and SSM agent
+          cat > user-data.sh << 'EOF'
+        #!/bin/bash
+        yum update -y
+        amazon-linux-extras install docker -y
+        systemctl start docker
+        systemctl enable docker
+        usermod -a -G docker ec2-user
+        # Install AWS CLI v2
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        ./aws/install
+        rm -f awscliv2.zip
+        # Ensure SSM agent is installed
+        yum install -y amazon-ssm-agent
+        systemctl start amazon-ssm-agent
+        systemctl enable amazon-ssm-agent
+        EOF
+          
+          # Create new EC2 instance with SSM IAM role and user data
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id ami-0f918f7e67a3323f0 \
+            --image-id ami-0c55b159cbfafe1f0 \
             --count 1 \
-            --instance-type t2.micro \
+            --instance-type t3.micro \
             --key-name ${{ secrets.EC2_KEY_PAIR_NAME }} \
             --security-group-ids ${{ secrets.SECURITY_GROUP_ID }} \
             --subnet-id ${{ secrets.SUBNET_ID_1 }} \
             --iam-instance-profile Name=${{ secrets.INSTANCE_PROFILE_NAME }} \
+            --user-data file://user-data.sh \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=java-app},{Key=Environment,Value=production}]' \
             --query 'Instances[0].InstanceId' \
             --output text \
@@ -206,8 +308,9 @@ jobs:
           
           echo "Created new instance: $INSTANCE_ID"
           
-          # Wait for instance to be running
+          # Wait for instance to be running and SSM to be ready
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_REGION
+          aws ssm wait instance-online --instance-ids $INSTANCE_ID --region $AWS_REGION
           
           INSTANCE_IDS=$INSTANCE_ID
         fi
@@ -226,25 +329,37 @@ jobs:
           echo "Instance public IP: $PUBLIC_IP"
           
           # Update the application on the instance using SSM
-          aws ssm send-command \
+          COMMAND_ID=$(aws ssm send-command \
             --instance-ids $INSTANCE_ID \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
+              "echo Pulling Docker image: $DOCKER_IMAGE_URI",
               "docker stop java-app || true",
               "docker rm java-app || true",
-              "docker pull '$DOCKER_IMAGE_URI'",
-              "docker run -d --name java-app -p 9000:9000 --restart unless-stopped '$DOCKER_IMAGE_URI'",
+              "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $DOCKER_IMAGE_URI",
+              "docker pull $DOCKER_IMAGE_URI",
+              "docker run -d --name java-app -p 9000:9000 --restart unless-stopped $DOCKER_IMAGE_URI",
               "sleep 10",
-              "curl -f http://localhost:9000/ || exit 1"
+              "curl -f http://localhost:9000/health || exit 1"
             ]' \
             --region $AWS_REGION \
-            --output text || echo "SSM command failed, ensure SSM agent and IAM role are configured"
+            --output text \
+            --query 'Command.CommandId')
+          
+          echo "SSM Command ID: $COMMAND_ID"
+          
+          # Wait for SSM command to complete and check status
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --region $AWS_REGION || (echo "SSM command failed for $INSTANCE_ID, checking logs..." && \
+            aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region $AWS_REGION && exit 1)
         done
         
     - name: Wait for container to be healthy
       run: |
-        echo "Waiting for 60 seconds before health check..."
-        sleep 60
+        echo "Waiting for 90 seconds before health check..."
+        sleep 90
         for INSTANCE_ID in $(aws ec2 describe-instances \
           --filters "Name=tag:Name,Values=java-app" "Name=instance-state-name,Values=running" \
           --query 'Reservations[].Instances[].InstanceId' \
@@ -256,44 +371,53 @@ jobs:
             --output text \
             --region $AWS_REGION)
           echo "Performing health check on $PUBLIC_IP..."
-          curl -f http://$PUBLIC_IP:9000/ || (echo "Health check failed for $PUBLIC_IP!" && exit 1)
+          for attempt in {1..3}; do
+            if curl -f http://$PUBLIC_IP:9000/health; then
+              echo "Health check passed for $PUBLIC_IP"
+              break
+            else
+              echo "Health check attempt $attempt failed for $PUBLIC_IP"
+              if [ $attempt -eq 3 ]; then
+                echo "Health check failed for $PUBLIC_IP after 3 attempts!"
+                # Fetch container logs for debugging
+                COMMAND_ID=$(aws ssm send-command \
+                  --instance-ids $INSTANCE_ID \
+                  --document-name "AWS-RunShellScript" \
+                  --parameters 'commands=["docker logs java-app"]' \
+                  --region $AWS_REGION \
+                  --output text \
+                  --query 'Command.CommandId')
+                aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region $AWS_REGION
+                aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region $AWS_REGION
+                exit 1
+              fi
+              sleep 30
+            fi
+          done
         done
         
-    - name: Update Load Balancer
+    - name: Register instances with Load Balancer
       run: |
-        # Ensure load balancer exists and targets are registered
-        ALB_ARN=$(aws elbv2 describe-load-balancers \
-          --names java-app-alb \
-          --query 'LoadBalancers[0].LoadBalancerArn' \
+        # Get target group ARN
+        TG_ARN=$(aws elbv2 describe-target-groups \
+          --names java-app-targets \
+          --query 'TargetGroups[0].TargetGroupArn' \
           --output text \
-          --region $AWS_REGION 2>/dev/null || echo "None")
+          --region $AWS_REGION)
         
-        if [ "$ALB_ARN" = "None" ]; then
-          echo "Load balancer not found. Run the create-elb.sh script manually."
-        else
-          echo "Load balancer exists: $ALB_ARN"
-          
-          # Get target group ARN
-          TG_ARN=$(aws elbv2 describe-target-groups \
-            --names java-app-targets \
-            --query 'TargetGroups[0].TargetGroupArn' \
-            --output text \
-            --region $AWS_REGION)
-          
-          # Register new instances with target group
-          INSTANCE_IDS=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=java-app" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId' \
-            --output text \
-            --region $AWS_REGION)
-          
-          for INSTANCE_ID in $INSTANCE_IDS; do
-            aws elbv2 register-targets \
-              --target-group-arn $TG_ARN \
-              --targets Id=$INSTANCE_ID,Port=9000 \
-              --region $AWS_REGION || echo "Target already registered"
-          done
-        fi
+        # Register new instances with target group
+        INSTANCE_IDS=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=java-app" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[].Instances[].InstanceId' \
+          --output text \
+          --region $AWS_REGION)
+        
+        for INSTANCE_ID in $INSTANCE_IDS; do
+          aws elbv2 register-targets \
+            --target-group-arn $TG_ARN \
+            --targets Id=$INSTANCE_ID,Port=9000 \
+            --region $AWS_REGION || echo "Target already registered"
+        done
         
     - name: Deployment Summary
       run: |
@@ -302,7 +426,7 @@ jobs:
         echo "🌍 Region: $AWS_REGION"
         echo "📝 Check AWS console for detailed status"
         
-        # Get load balancer URL if available
+        # Get load balancer URL
         ALB_DNS=$(aws elbv2 describe-load-balancers \
           --names java-app-alb \
           --query 'LoadBalancers[0].DNSName' \
@@ -312,3 +436,4 @@ jobs:
         if [ "$ALB_DNS" != "Not found" ]; then
           echo "🌐 Application URL: http://$ALB_DNS"
         fi
+```
