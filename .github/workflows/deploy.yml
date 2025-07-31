@@ -200,6 +200,26 @@ jobs:
           echo "Security group rule for TCP 9000 verified (sgr-06156665bc4acd952)"
         fi
         
+    - name: Validate subnets for ALB
+      run: |
+        # Check if SUBNET_ID_2 is set
+        if [ -z "${{ secrets.SUBNET_ID_2 }}" ]; then
+          echo "ERROR: SUBNET_ID_2 is not set in GitHub secrets."
+          echo "Please add SUBNET_ID_2 in a different Availability Zone from SUBNET_ID_1."
+          echo "Run 'aws ec2 describe-subnets --region ap-south-1' to find a suitable subnet."
+          exit 1
+        fi
+        # Verify subnets are in different AZs
+        AZ1=$(aws ec2 describe-subnets --subnet-ids ${{ secrets.SUBNET_ID_1 }} --region $AWS_REGION --query 'Subnets[0].AvailabilityZone' --output text)
+        AZ2=$(aws ec2 describe-subnets --subnet-ids ${{ secrets.SUBNET_ID_2 }} --region $AWS_REGION --query 'Subnets[0].AvailabilityZone' --output text)
+        if [ "$AZ1" = "$AZ2" ]; then
+          echo "ERROR: SUBNET_ID_1 ($AZ1) and SUBNET_ID_2 ($AZ2) are in the same Availability Zone."
+          echo "ALB requires subnets in different AZs. Please update SUBNET_ID_2."
+          exit 1
+        else
+          echo "Subnets validated: SUBNET_ID_1 ($AZ1), SUBNET_ID_2 ($AZ2)"
+        fi
+        
     - name: Create or update Load Balancer
       run: |
         # Check if ALB exists
@@ -220,7 +240,7 @@ jobs:
             --ip-address-type ipv4 \
             --region $AWS_REGION \
             --query 'LoadBalancers[0].LoadBalancerArn' \
-            --output text)
+            --output text) || (echo "Failed to create ALB, check subnets and IAM permissions" && exit 1)
           echo "Created ALB: $ALB_ARN"
           
           # Create Target Group
@@ -238,7 +258,7 @@ jobs:
             --unhealthy-threshold-count 2 \
             --region $AWS_REGION \
             --query 'TargetGroups[0].TargetGroupArn' \
-            --output text)
+            --output text) || (echo "Failed to create target group, check VPC_ID and IAM permissions" && exit 1)
           echo "Created Target Group: $TG_ARN"
           
           # Create Listener
@@ -247,7 +267,7 @@ jobs:
             --protocol HTTP \
             --port 80 \
             --default-actions Type=forward,TargetGroupArn=$TG_ARN \
-            --region $AWS_REGION
+            --region $AWS_REGION || (echo "Failed to create listener" && exit 1)
         else
           echo "Load balancer already exists: $ALB_ARN"
           TG_ARN=$(aws elbv2 describe-target-groups \
@@ -303,7 +323,7 @@ jobs:
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=java-app},{Key=Environment,Value=production}]' \
             --query 'Instances[0].InstanceId' \
             --output text \
-            --region $AWS_REGION)
+            --region $AWS_REGION) || (echo "Failed to create EC2 instance, check AMI, subnet, and IAM permissions" && exit 1)
           
           echo "Created new instance: $INSTANCE_ID"
           
@@ -343,7 +363,7 @@ jobs:
             ]' \
             --region $AWS_REGION \
             --output text \
-            --query 'Command.CommandId')
+            --query 'Command.CommandId') || (echo "Failed to send SSM command" && exit 1)
           
           echo "SSM Command ID: $COMMAND_ID"
           
@@ -402,7 +422,7 @@ jobs:
           --names java-app-targets \
           --query 'TargetGroups[0].TargetGroupArn' \
           --output text \
-          --region $AWS_REGION)
+          --region $AWS_REGION) || (echo "Failed to find target group java-app-targets" && exit 1)
         
         # Register new instances with target group
         INSTANCE_IDS=$(aws ec2 describe-instances \
