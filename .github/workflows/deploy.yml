@@ -291,23 +291,38 @@ jobs:
         if [ -z "$INSTANCE_IDS" ]; then
           echo "No running EC2 instances found. Creating new instance..."
           
-          # Create user data script to install Docker and SSM agent
+          # Create user data script to install Docker and SSM agent with retries
           cat > user-data.sh << 'EOF'
         #!/bin/bash
+        set -e
         yum update -y
         amazon-linux-extras install docker -y
         systemctl start docker
         systemctl enable docker
         usermod -a -G docker ec2-user
         # Install AWS CLI v2
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        for attempt in {1..3}; do
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && break
+          echo "AWS CLI download failed, attempt $attempt"
+          sleep 10
+        done
         unzip awscliv2.zip
         ./aws/install
         rm -f awscliv2.zip
-        # Ensure SSM agent is installed
-        yum install -y amazon-ssm-agent
+        # Install and verify SSM agent
+        for attempt in {1..3}; do
+          yum install -y amazon-ssm-agent && break
+          echo "SSM agent installation failed, attempt $attempt"
+          sleep 10
+        done
         systemctl start amazon-ssm-agent
         systemctl enable amazon-ssm-agent
+        # Verify SSM connectivity
+        for attempt in {1..3}; do
+          aws ssm describe-instance-information --region ap-south-1 && break
+          echo "SSM connectivity check failed, attempt $attempt"
+          sleep 10
+        done
         EOF
           
           # Create new EC2 instance with SSM IAM role and user data
@@ -329,14 +344,53 @@ jobs:
           
           # Wait for instance to be running and SSM to be ready
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_REGION
-          aws ssm wait instance-online --instance-ids $INSTANCE_ID --region $AWS_REGION
+          echo "Waiting for SSM agent to be online (up to 5 minutes)..."
+          for attempt in {1..10}; do
+            SSM_STATUS=$(aws ssm describe-instance-information \
+              --instance-ids $INSTANCE_ID \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text \
+              --region $AWS_REGION 2>/dev/null || echo "Offline")
+            if [ "$SSM_STATUS" = "Online" ]; then
+              echo "SSM agent is online for instance $INSTANCE_ID"
+              break
+            fi
+            echo "SSM agent not online, attempt $attempt/10, waiting 30 seconds..."
+            sleep 30
+          done
+          if [ "$SSM_STATUS" != "Online" ]; then
+            echo "ERROR: SSM agent not online for instance $INSTANCE_ID after 5 minutes"
+            exit 1
+          fi
           
           INSTANCE_IDS=$INSTANCE_ID
         fi
         
-        # Update each instance
+        # Verify instance state and SSM status before sending commands
         for INSTANCE_ID in $INSTANCE_IDS; do
-          echo "Updating instance: $INSTANCE_ID"
+          echo "Verifying instance: $INSTANCE_ID"
+          
+          # Check instance state
+          INSTANCE_STATE=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].State.Name' \
+            --output text \
+            --region $AWS_REGION)
+          if [ "$INSTANCE_STATE" != "running" ]; then
+            echo "ERROR: Instance $INSTANCE_ID is in state $INSTANCE_STATE, expected running"
+            exit 1
+          fi
+          
+          # Check SSM status
+          SSM_STATUS=$(aws ssm describe-instance-information \
+            --instance-ids $INSTANCE_ID \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text \
+            --region $AWS_REGION 2>/dev/null || echo "Offline")
+          if [ "$SSM_STATUS" != "Online" ]; then
+            echo "ERROR: SSM agent not online for instance $INSTANCE_ID"
+            exit 1
+          fi
           
           # Get instance public IP
           PUBLIC_IP=$(aws ec2 describe-instances \
@@ -345,7 +399,7 @@ jobs:
             --output text \
             --region $AWS_REGION)
           
-          echo "Instance public IP: $PUBLIC_IP"
+          echo "Instance $INSTANCE_ID is running with public IP: $PUBLIC_IP"
           
           # Update the application on the instance using SSM
           COMMAND_ID=$(aws ssm send-command \
@@ -363,7 +417,8 @@ jobs:
             ]' \
             --region $AWS_REGION \
             --output text \
-            --query 'Command.CommandId') || (echo "Failed to send SSM command" && exit 1)
+            --query 'Command.CommandId') || (echo "Failed to send SSM command for $INSTANCE_ID, check IAM permissions and instance state" && \
+            aws ssm describe-instance-information --instance-ids $INSTANCE_ID --region $AWS_REGION && exit 1)
           
           echo "SSM Command ID: $COMMAND_ID"
           
