@@ -145,8 +145,13 @@ jobs:
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       run: |
-        # Build Docker image
-        docker build -f docker/Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG .
+        # Check if Dockerfile exists in docker/ folder, otherwise use root
+        DOCKERFILE_PATH="docker/Dockerfile"
+        if [ ! -f "$DOCKERFILE_PATH" ]; then
+          DOCKERFILE_PATH="Dockerfile"
+          echo "Dockerfile not found in docker/, using root Dockerfile"
+        fi
+        docker build -f $DOCKERFILE_PATH -t $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG .
         docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$DOCKER_IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
         
         # Push image to ECR
@@ -185,7 +190,7 @@ jobs:
         if [ -z "$INSTANCE_IDS" ]; then
           echo "No running EC2 instances found. Creating new instance..."
           
-          # Create new EC2 instance
+          # Create new EC2 instance with SSM IAM role
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-0c02fb55956c7d316 \
             --count 1 \
@@ -193,6 +198,7 @@ jobs:
             --key-name ${{ secrets.EC2_KEY_PAIR_NAME }} \
             --security-group-ids ${{ secrets.SECURITY_GROUP_ID }} \
             --subnet-id ${{ secrets.SUBNET_ID_1 }} \
+            --iam-instance-profile Name=${{ secrets.INSTANCE_PROFILE_NAME }} \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=java-app},{Key=Environment,Value=production}]' \
             --query 'Instances[0].InstanceId' \
             --output text \
@@ -219,7 +225,7 @@ jobs:
           
           echo "Instance public IP: $PUBLIC_IP"
           
-          # Update the application on the instance
+          # Update the application on the instance using SSM
           aws ssm send-command \
             --instance-ids $INSTANCE_ID \
             --document-name "AWS-RunShellScript" \
@@ -232,7 +238,25 @@ jobs:
               "curl -f http://localhost:9000/ || exit 1"
             ]' \
             --region $AWS_REGION \
-            --output text || echo "SSM not available, deployment via SSH required"
+            --output text || echo "SSM command failed, ensure SSM agent and IAM role are configured"
+        done
+        
+    - name: Wait for container to be healthy
+      run: |
+        echo "Waiting for 60 seconds before health check..."
+        sleep 60
+        for INSTANCE_ID in $(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=java-app" "Name=instance-state-name,Values=running" \
+          --query 'Reservations[].Instances[].InstanceId' \
+          --output text \
+          --region $AWS_REGION); do
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text \
+            --region $AWS_REGION)
+          echo "Performing health check on $PUBLIC_IP..."
+          curl -f http://$PUBLIC_IP:9000/ || (echo "Health check failed for $PUBLIC_IP!" && exit 1)
         done
         
     - name: Update Load Balancer
