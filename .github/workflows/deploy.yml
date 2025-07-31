@@ -192,9 +192,9 @@ jobs:
           
           # Create new EC2 instance with SSM IAM role
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id ami-0c02fb55956c7d316 \
+            --image-id ami-0f918f7e67a3323f0 \
             --count 1 \
-            --instance-type t3.micro \
+            --instance-type t2.micro \
             --key-name ${{ secrets.EC2_KEY_PAIR_NAME }} \
             --security-group-ids ${{ secrets.SECURITY_GROUP_ID }} \
             --subnet-id ${{ secrets.SUBNET_ID_1 }} \
