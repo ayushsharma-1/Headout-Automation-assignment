@@ -1,0 +1,60 @@
+{
+  "LoadBalancerName": "java-app-alb",
+  "Scheme": "internet-facing",
+  "Type": "application",
+  "IpAddressType": "ipv4",
+  "SecurityGroups": [
+    "sg-xxxxxxxxx"
+  ],
+  "Subnets": [
+    "subnet-xxxxxxxxx",
+    "subnet-yyyyyyyyy"
+  ],
+  "Tags": [
+    {
+      "Key": "Name",
+      "Value": "java-app-alb"
+    },
+    {
+      "Key": "Environment",
+      "Value": "production"
+    },
+    {
+      "Key": "Project",
+      "Value": "java-deployment"
+    }
+  ],
+  "TargetGroup": {
+    "Name": "java-app-targets",
+    "Protocol": "HTTP",
+    "Port": 9000,
+    "TargetType": "instance",
+    "HealthCheckSettings": {
+      "HealthCheckEnabled": true,
+      "HealthCheckIntervalSeconds": 30,
+      "HealthCheckPath": "/",
+      "HealthCheckPort": "traffic-port",
+      "HealthCheckProtocol": "HTTP",
+      "HealthCheckTimeoutSeconds": 5,
+      "HealthyThresholdCount": 2,
+      "UnhealthyThresholdCount": 3,
+      "Matcher": {
+        "HttpCode": "200"
+      }
+    }
+  },
+  "Listener": {
+    "Protocol": "HTTP",
+    "Port": 80,
+    "DefaultAction": {
+      "Type": "forward"
+    }
+  },
+  "Attributes": {
+    "access_logs.s3.enabled": "false",
+    "deletion_protection.enabled": "false",
+    "idle_timeout.timeout_seconds": "60",
+    "routing.http2.enabled": "true",
+    "routing.http.drop_invalid_header_fields.enabled": "false"
+  }
+}

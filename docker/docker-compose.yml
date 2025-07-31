@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  java-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      - JAVA_OPTS=-Xmx512m -Xms256m -XX:+UseG1GC -Djava.awt.headless=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    name: java-app-network
