@@ -2,6 +2,16 @@
 
 # Main deployment script for Java application
 # Usage: ./deploy.sh [local|ec2|full]
+# Description: 
+#   1. Clones GitHub repository using SSH
+#   2. Starts Java application with 'java -jar build/libs/project.jar' on port 9000
+#   3. Creates Dockerfile for EC2 deployment
+#   4. Deploys to AWS EC2 instances
+#   5. Creates AWS Application Load Balancer with health checks
+#
+# Author: Deployment Team
+# Version: 1.0
+# Date: $(date +%Y-%m-%d)
 
 set -euo pipefail
 
@@ -17,12 +27,13 @@ LOG_DIR="/tmp/deployment-logs"
 LOG_FILE="$LOG_DIR/deploy-$(date +%Y%m%d-%H%M%S).log"
 mkdir -p "$LOG_DIR"
 
-# Logging function
+# Logging function with enhanced error tracking
 log() {
     local level=$1
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local caller="${BASH_SOURCE[2]:-unknown}:${BASH_LINENO[1]:-unknown}"
     
     case $level in
         "INFO")
@@ -38,7 +49,7 @@ log() {
             echo -e "${BLUE}[DEBUG]${NC} $message" | tee -a "$LOG_FILE"
             ;;
     esac
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    echo "[$timestamp] [$level] [$caller] $message" >> "$LOG_FILE"
 }
 
 # Error handling

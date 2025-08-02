@@ -1,7 +1,24 @@
 #!/bin/bash
 
-# Script to create AWS Application Load Balancer
+# Script to create AWS Application Load Balancer with comprehensive configuration
 # Usage: ./create-elb.sh
+# Description:
+#   - Creates Application Load Balancer with Internet-facing access
+#   - Configures Target Groups with health checks on port 9000
+#   - Sets up HTTP listener on port 80 forwarding to application port 9000
+#   - Registers EC2 instances automatically
+#   - Implements comprehensive health monitoring and logging
+#
+# Load Balancer Parameters:
+#   Type: Application Load Balancer
+#   Scheme: Internet-facing
+#   Protocol: HTTP (port 80 -> 9000)
+#   Health Check: HTTP on / endpoint, 30s interval, 5s timeout
+#   Target Type: EC2 instances
+#
+# Author: Infrastructure Team
+# Version: 1.0
+# Date: $(date +%Y-%m-%d)
 
 set -euo pipefail
 

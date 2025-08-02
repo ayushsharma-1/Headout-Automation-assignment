@@ -1,4 +1,12 @@
-name: Deploy Java Application to AWS
+name: Complete Java Application Deployment Pipeline
+
+# This workflow implements the complete deployment pipeline:
+# 1. Clones repository from GitHub using SSH
+# 2. Builds and tests Java application 
+# 3. Creates Docker image and pushes to AWS ECR
+# 4. Deploys to EC2 instances with 'java -jar build/libs/project.jar' on port 9000
+# 5. Creates AWS Application Load Balancer with health checks
+# 6. Registers instances with load balancer for high availability
 
 on:
   push:

@@ -18,10 +18,10 @@ Fill these values in your `.env` file:
 
 ```bash
 # AWS Configuration (pre-filled for your account)
-AWS_ACCESS_KEY_ID=AKIA2YAMAEGNMHFB2JMV
+AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY_HERE  # ⚠️ ADD YOUR SECRET KEY
 AWS_REGION=ap-south-1
-AWS_ACCOUNT_ID=738759549338
+AWS_ACCOUNT_ID=
 
 # GitHub Repository (⚠️ CHANGE TO YOUR REPO)
 GITHUB_REPO_URL=git@github.com:username/repository.git

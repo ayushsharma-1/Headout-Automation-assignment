@@ -4,11 +4,11 @@
   "Type": "application",
   "IpAddressType": "ipv4",
   "SecurityGroups": [
-    "sg-xxxxxxxxx"
+    "sg-0e140ffd923770ff3"
   ],
   "Subnets": [
-    "subnet-xxxxxxxxx",
-    "subnet-yyyyyyyyy"
+    "subnet-0a7cf504bd3e20b57",
+    "subnet-0da6065e985ca8889"
   ],
   "Tags": [
     {
